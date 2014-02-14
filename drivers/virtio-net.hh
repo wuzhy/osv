@@ -12,6 +12,7 @@
 #include <bsd/sys/net/if_var.h>
 #include <bsd/sys/net/if.h>
 #include <bsd/sys/sys/mbuf.h>
+#include <osv/sched.hh>
 
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
@@ -212,9 +213,9 @@ public:
     void wait_for_queue(vring* queue);
     bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
     void receiver();
-    void fill_rx_ring();
+    void fill_rx_ring(unsigned idx);
 
-    bool ack_irq();
+    bool ack_irq(unsigned idx);
 
     /**
      * Transmit a single mbuf.
@@ -228,8 +229,9 @@ public:
     int tx_locked(struct mbuf* m_head, bool flush = false);
 
     struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+    unsigned pick_txq(struct mbuf* m, unsigned txqs);
     void kick(int queue) {_queues[queue]->kick();}
-    void tx_gc();
+    void tx_gc(unsigned idx);
     static hw_driver* probe(hw_device* dev);
 
     /**
@@ -291,8 +293,8 @@ private:
 
      /* Single Rx queue object */
     struct rxq {
-        rxq(vring* vq, std::function<void ()> poll_func)
-            : vqueue(vq), poll_task(poll_func, sched::thread::attr().name("virtio-net-rx")) {};
+        rxq(vring* vq, std::function<void ()> poll_func, sched::cpu* c)
+            : vqueue(vq), poll_task(poll_func, sched::thread::attr().pin(c).name("virtio-net-rx")) {};
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
@@ -310,18 +312,18 @@ private:
      * @param rxq Rx queue handle
      * @param out_data output buffer
      */
-    void fill_qstats(const struct rxq& rxq, struct if_data* out_data) const;
+    void fill_qstats(const struct rxq* rxq, struct if_data* out_data) const;
 
     /**
      * Fill the Tx queue statistics in the general info struct
      * @param txq Tx queue handle
      * @param out_data output buffer
      */
-    void fill_qstats(const struct txq& txq, struct if_data* out_data) const;
+    void fill_qstats(const struct txq* txq, struct if_data* out_data) const;
 
-    /* We currently support only a single Rx+Tx queue */
-    struct rxq _rxq;
-    struct txq _txq;
+    /* We currently support max_virtqueues_nr / 2 pairs of Rx+Tx queues */
+    struct rxq* _rxq[max_virtqueues_nr / 2];
+    struct txq* _txq[max_virtqueues_nr / 2];
 
     //maintains the virtio instance number for multiple drives
     static int _instance;
