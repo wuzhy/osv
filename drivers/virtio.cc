@@ -181,6 +181,9 @@ void virtio_driver::probe_virt_queues()
         // Debug print
         virtio_d("Queue[%d] -> size %d, paddr %x", (_num_queues-1), qsize, queue->get_paddr());
 
+        // Make sure that the map of qnum : ncpus is 2 : 1
+        if (_num_queues >= 2 * sched::cpus.size())
+            return;
     } while (true);
 }
 
