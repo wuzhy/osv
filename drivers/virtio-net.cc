@@ -338,11 +338,16 @@ void net::read_config()
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
     _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
+    _net_mq = get_guest_feature_bit(VIRTIO_NET_F_MQ);
+    if (_net_mq)
+       _max_queue_pairs = _config.max_virtqueue_pairs;
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
     net_i("Features: %s=%d", "host tso4", _host_tso4);
+    printf("Features: net_mq %d\n", _net_mq);
+    printf("Features: max_queue_pairs %d\n", _max_queue_pairs);
 }
 
 /**

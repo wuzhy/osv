@@ -269,7 +269,9 @@ private:
     bool _guest_tso4 = false;
     bool _host_tso4 = false;
     bool _guest_ufo = false;
+    bool _net_mq = false;
 
+    u16 _max_queue_pairs;
     u32 _hdr_size;
 
     gsi_level_interrupt _gsi;
