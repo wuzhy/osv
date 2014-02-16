@@ -144,10 +144,15 @@ bool virtio_driver::kick(int queue)
 void virtio_driver::probe_virt_queues()
 {
     u16 qsize = 0;
+    printf("probe virtio cpus %d\n", sched::cpus.size());
+
+    setup_features();
+    this->read_config();
 
     do {
 
         if (_num_queues >= max_virtqueues_nr) {
+            printf("_num_queues >= max_virtqueues_nr\n");
             return;
         }
 
@@ -155,6 +160,7 @@ void virtio_driver::probe_virt_queues()
         virtio_conf_writew(VIRTIO_PCI_QUEUE_SEL, _num_queues);
         qsize = virtio_conf_readw(VIRTIO_PCI_QUEUE_NUM);
         if (0 == qsize) {
+            printf("0 == qsize\n");
             break;
         }
 
@@ -167,6 +173,7 @@ void virtio_driver::probe_virt_queues()
             virtio_conf_writew(VIRTIO_MSI_QUEUE_VECTOR, _num_queues);
             if (virtio_conf_readw(VIRTIO_MSI_QUEUE_VECTOR) != _num_queues) {
                 virtio_e("Setting MSIx entry for queue %d failed.", _num_queues);
+                printf("msix\n");
                 return;
             }
         }
@@ -181,10 +188,14 @@ void virtio_driver::probe_virt_queues()
         // Debug print
         virtio_d("Queue[%d] -> size %d, paddr %x", (_num_queues-1), qsize, queue->get_paddr());
 
-        // Make sure that the map of qnum : ncpus is 2 : 1
-        if (_num_queues >= 2 * sched::cpus.size())
+        // Make sure that qnum is 2 * ncpus + 1 if ctlq is supported,
+        // otherwise it's 2 * ncpus
+        if (_num_queues >= 2 * sched::cpus.size()) {
+	    printf("xxxx nq %d\n", _num_queues);
             return;
+        }
     } while (true);
+    printf("probe cpus %d, num_queues %d\n", sched::cpus.size(), _num_queues);
 }
 
 vring* virtio_driver::get_virt_queue(unsigned idx)

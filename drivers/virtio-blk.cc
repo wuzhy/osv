@@ -115,13 +115,13 @@ bool blk::ack_irq()
 blk::blk(pci::device& pci_dev)
     : virtio_driver(pci_dev), _ro(false)
 {
-
+printf("blk::blk\n");
     _driver_name = "virtio-blk";
     _id = _instance++;
     virtio_i("VIRTIO BLK INSTANCE %d", _id);
 
-    setup_features();
-    read_config();
+//    setup_features();
+//    read_config();
 
     //register the single irq callback for the block
     sched::thread* t = new sched::thread([this] { this->req_done(); },

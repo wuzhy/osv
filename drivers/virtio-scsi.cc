@@ -372,12 +372,12 @@ bool scsi::ack_irq()
 scsi::scsi(pci::device& dev)
     : virtio_driver(dev)
 {
-
+printf("scsi::scsi\n");
     _driver_name = "virtio-scsi";
     _id = _instance++;
 
-    setup_features();
-    read_config();
+//    setup_features();
+//    read_config();
 
     //register the single irq callback for the block
     sched::thread* t = new sched::thread([this] { this->req_done(); },

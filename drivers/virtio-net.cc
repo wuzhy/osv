@@ -128,10 +128,13 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 
     net_d("*** processing packet! ***");
 
-    int error = vnet->tx_locked(m_head);
+    unsigned idx = vnet->pick_txq(m_head);
+    int error = vnet->tx_locked(idx, m_head);
 
     if (!error)
-        vnet->kick(1);
+        vnet->kick(2 * idx + 1);
+    else
+        printf("if_transmit error %d\n", error);
 
     vnet->_tx_ring_lock.unlock();
 
@@ -204,17 +207,20 @@ net::net(pci::device& dev)
 {
     unsigned idx;
 
+printf("net::net num_queues %d\n", _num_queues);
     for (idx = 0; idx < _num_queues / 2; idx++) {
         _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
         _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
+printf("net::net idx %d\n", idx);
     }
+printf("net::net1 idx %d\n", idx);
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
 
-    setup_features();
-    read_config();
+//    setup_features();
+//    read_config();
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
@@ -238,6 +244,7 @@ net::net(pci::device& dev)
     _ifn->if_getinfo = if_getinfo;
 
     int ifn_qsize = 0;
+printf("net::net num_queues1 %d\n", _num_queues);
     for (idx = 0; idx < _num_queues / 2; idx++)
         ifn_qsize += _txq[idx]->vqueue->size();
 
@@ -262,6 +269,7 @@ net::net(pci::device& dev)
     _ifn->if_capenable = _ifn->if_capabilities | IFCAP_HWSTATS;
 
     //Start the polling thread before attaching it to the Rx interrupt
+printf("net::net num_queues2 %d\n", _num_queues);
     for (idx = 0; idx < _num_queues / 2; idx++)
         _rxq[idx]->poll_task.start();
 
@@ -300,6 +308,7 @@ net::~net()
 
 void net::read_config()
 {
+printf("net::read_config\n");
     //read all of the net config  in one shot
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
 
@@ -321,11 +330,15 @@ void net::read_config()
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
     _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
+    if (get_guest_feature_bit(VIRTIO_NET_F_MQ))
+       printf("VIRTIO_NET_F_MQ is enabled\n");
+    
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
     net_i("Features: %s=%d", "host tso4", _host_tso4);
+    printf("Features: max_queue_pairs %d\n", _config.max_virtqueue_pairs);
 }
 
 /**
@@ -391,8 +404,9 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 void net::receiver()
 {
     unsigned idx = sched::cpu::current()->id;
-    vring* vq = _rxq[idx]->vqueue;
-
+    printf("receiver idx %d\n", idx);
+    struct rxq* rxq = _rxq[idx];
+    vring* vq = rxq->vqueue;
     while (1) {
 
         // Wait for rx queue (used elements)
@@ -497,11 +511,11 @@ void net::receiver()
             fill_rx_ring(idx);
 
         // Update the stats
-        _rxq[idx]->stats.rx_drops      += rx_drops;
-        _rxq[idx]->stats.rx_packets    += rx_packets;
-        _rxq[idx]->stats.rx_csum       += csum_ok;
-        _rxq[idx]->stats.rx_csum_err   += csum_err;
-        _rxq[idx]->stats.rx_bytes      += rx_bytes;
+        rxq->stats.rx_drops      += rx_drops;
+        rxq->stats.rx_packets    += rx_packets;
+        rxq->stats.rx_csum       += csum_ok;
+        rxq->stats.rx_csum_err   += csum_err;
+        rxq->stats.rx_bytes      += rx_bytes;
     }
 }
 
@@ -535,22 +549,20 @@ void net::fill_rx_ring(unsigned idx)
 }
 
 // TODO: Does it really have to be "locked"?
-int net::tx_locked(struct mbuf* m_head, bool flush)
+int net::tx_locked(unsigned idx, struct mbuf* m_head, bool flush)
 {
     DEBUG_ASSERT(_tx_ring_lock.owned(), "_tx_ring_lock is not locked!");
 
     struct mbuf* m;
     net_req* req = new net_req;
-    vring* vq;
+    struct txq* txq = _txq[idx];
+    vring* vq = txq->vqueue;
+    auto vq_sg_vec = &vq->_sg_vec;
     int rc = 0;
-    unsigned idx;
-    struct txq_stats* stats;
+    struct txq_stats* stats = &txq->stats;
     u64 tx_bytes = 0;
 
     req->um.reset(m_head);
-
-    idx = pick_txq(m_head, _num_queues / 2);
-    stats = &_txq[idx]->stats;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
         m = tx_offload(m_head, &req->mhdr.hdr);
@@ -563,7 +575,6 @@ int net::tx_locked(struct mbuf* m_head, bool flush)
         }
     }
 
-    vq = _txq[idx]->vqueue;
     vq->init_sg();
     vq->add_out_sg(static_cast<void*>(&req->mhdr), _hdr_size);
 
@@ -601,7 +612,7 @@ int net::tx_locked(struct mbuf* m_head, bool flush)
         goto out;
     }
 
-    trace_virtio_net_tx_packet(_ifn->if_index, vq->_sg_vec.size());
+    trace_virtio_net_tx_packet(_ifn->if_index, vq_sg_vec->size());
 
 out:
 
@@ -714,7 +725,7 @@ net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
 // TODO: it still need more effort
 //  1. a better way to select tx
 //  2. work together with Vlad Zolotarov's Tx softirq affinity
-unsigned net::pick_txq(mbuf* m, unsigned txqs)
+unsigned net::pick_txq(mbuf* m)
 {
 //    struct ether_header* eh;
 //    u16 hash;
@@ -722,9 +733,13 @@ unsigned net::pick_txq(mbuf* m, unsigned txqs)
 //    eh = mtod(m, struct ether_header*);
 //    hash = ntohs(eh->ether_type);
 
-//    return (unsigned) (((u64) hash * txqs) >> 32);
+//    return (unsigned) (((u64) hash * (_num_queues / 2)) >> 32);
 
-      return sched::cpu::current()->id;
+      unsigned idx = sched::cpu::current()->id;
+      if (idx >= _num_queues / 2)
+          printf("pick idx %d\n", idx);
+
+      return idx;
 }
 
 void net::tx_gc(unsigned idx)
@@ -746,6 +761,7 @@ void net::tx_gc(unsigned idx)
 
 u32 net::get_driver_features()
 {
+printf("net::get_driver_features\n");
     u32 base = virtio_driver::get_driver_features();
     return (base | (1 << VIRTIO_NET_F_MAC)        \
                  | (1 << VIRTIO_NET_F_MRG_RXBUF)  \
@@ -755,8 +771,9 @@ u32 net::get_driver_features()
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
-                 | (1 << VIRTIO_NET_F_GUEST_ECN)
-                 | (1 << VIRTIO_NET_F_GUEST_UFO)
+                 | (1 << VIRTIO_NET_F_GUEST_ECN)  \
+                 | (1 << VIRTIO_NET_F_GUEST_UFO)  \
+                 | (1 << VIRTIO_NET_F_MQ)
             );
 }
 

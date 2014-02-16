@@ -226,10 +226,10 @@ public:
      * @return 0 in case of success and an appropriate error code
      *         otherwise
      */
-    int tx_locked(struct mbuf* m_head, bool flush = false);
+    int tx_locked(unsigned idx, struct mbuf* m_head, bool flush = false);
 
     struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
-    unsigned pick_txq(struct mbuf* m, unsigned txqs);
+    unsigned pick_txq(struct mbuf* m);
     void kick(int queue) {_queues[queue]->kick();}
     void tx_gc(unsigned idx);
     static hw_driver* probe(hw_device* dev);
