@@ -128,10 +128,11 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 
     net_d("*** processing packet! ***");
 
-    int error = vnet->tx_locked(m_head);
+    unsigned idx = vnet->pick_txq(m_head);
+    int error = vnet->tx_locked(idx, m_head);
 
     if (!error)
-        vnet->kick(1);
+        vnet->kick(2 * idx + 1);
 
     vnet->_tx_ring_lock.unlock();
 
@@ -204,17 +205,17 @@ net::net(pci::device& dev)
 {
     unsigned idx;
 
-    for (idx = 0; idx < _num_queues / 2; idx++) {
-        _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
-        _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
-    }
-
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
 
     setup_features();
     read_config();
+
+    for (idx = 0; idx < _num_queues / 2; idx++) {
+        _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
+        _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
+    }
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
@@ -296,6 +297,22 @@ net::~net()
 
     ether_ifdetach(_ifn);
     if_free(_ifn);
+    free_net_queues();
+}
+
+void net::free_net_queues()
+{
+    for (unsigned idx = 0; idx < _num_queues / 2; idx++) {
+       if (nullptr != _rxq[idx]) {
+          delete _rxq[idx];
+          _rxq[idx] = nullptr;
+       }
+
+       if (nullptr != _txq[idx]) {
+          delete _txq[idx];
+          _txq[idx] = nullptr;
+       }
+    }
 }
 
 void net::read_config()
@@ -535,7 +552,7 @@ void net::fill_rx_ring(unsigned idx)
 }
 
 // TODO: Does it really have to be "locked"?
-int net::tx_locked(struct mbuf* m_head, bool flush)
+int net::tx_locked(unsigned idx, struct mbuf* m_head, bool flush)
 {
     DEBUG_ASSERT(_tx_ring_lock.owned(), "_tx_ring_lock is not locked!");
 
@@ -543,13 +560,11 @@ int net::tx_locked(struct mbuf* m_head, bool flush)
     net_req* req = new net_req;
     vring* vq;
     int rc = 0;
-    unsigned idx;
     struct txq_stats* stats;
     u64 tx_bytes = 0;
 
     req->um.reset(m_head);
 
-    idx = pick_txq(m_head, _num_queues / 2);
     stats = &_txq[idx]->stats;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
@@ -714,7 +729,7 @@ net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
 // TODO: it still need more effort
 //  1. a better way to select tx
 //  2. work together with Vlad Zolotarov's Tx softirq affinity
-unsigned net::pick_txq(mbuf* m, unsigned txqs)
+unsigned net::pick_txq(mbuf* m)
 {
 //    struct ether_header* eh;
 //    u16 hash;
@@ -722,7 +737,7 @@ unsigned net::pick_txq(mbuf* m, unsigned txqs)
 //    eh = mtod(m, struct ether_header*);
 //    hash = ntohs(eh->ether_type);
 
-//    return (unsigned) (((u64) hash * txqs) >> 32);
+//    return (unsigned) (((u64) hash * (_num_queues / 2)) >> 32);
 
       return sched::cpu::current()->id;
 }
@@ -755,8 +770,9 @@ u32 net::get_driver_features()
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
-                 | (1 << VIRTIO_NET_F_GUEST_ECN)
-                 | (1 << VIRTIO_NET_F_GUEST_UFO)
+                 | (1 << VIRTIO_NET_F_GUEST_ECN)  \
+                 | (1 << VIRTIO_NET_F_GUEST_UFO)  \
+                 | (1 << VIRTIO_NET_F_MQ)
             );
 }
 
