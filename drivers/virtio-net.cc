@@ -309,6 +309,8 @@ net::~net()
 void net::read_config()
 {
 printf("net::read_config\n");
+    virtio_driver::read_config();
+
     //read all of the net config  in one shot
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
 

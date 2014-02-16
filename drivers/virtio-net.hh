@@ -206,7 +206,7 @@ public:
     virtual ~net();
 
     virtual const std::string get_name() { return _driver_name; }
-    void read_config();
+    virtual void read_config();
 
     virtual u32 get_driver_features();
 

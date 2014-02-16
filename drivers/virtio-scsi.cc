@@ -442,6 +442,9 @@ scsi::scsi_req::scsi_req(struct bio* bio, u16 target, u16 lun, u8 cmd)
 
 void scsi::read_config()
 {
+printf("scsi::read_config\n");
+    virtio_driver::read_config();
+
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
 }
 
