@@ -204,6 +204,7 @@ public:
     explicit net(pci::device& dev);
     virtual ~net();
 
+    void free_vqs();
     virtual const std::string get_name() { return _driver_name; }
     void read_config();
 
@@ -212,9 +213,9 @@ public:
     void wait_for_queue(vring* queue);
     bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
     void receiver();
-    void fill_rx_ring();
+    void fill_rx_ring(unsigned idx);
 
-    bool ack_irq();
+    bool ack_irq(unsigned idx);
 
     /**
      * Transmit a single mbuf.
@@ -225,11 +226,12 @@ public:
      * @return 0 in case of success and an appropriate error code
      *         otherwise
      */
-    int tx_locked(struct mbuf* m_head, bool flush = false);
+    int tx_locked(unsigned idx, struct mbuf* m_head, bool flush = false);
 
     struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+    unsigned pick_vq();
     void kick(int queue) {_queues[queue]->kick();}
-    void tx_gc();
+    void tx_gc(unsigned idx);
     static hw_driver* probe(hw_device* dev);
 
     /**
@@ -267,6 +269,8 @@ private:
     bool _host_tso4 = false;
     bool _guest_ufo = false;
 
+    u16 _max_queue_pairs;
+    u16 _cur_queue_pairs;
     u32 _hdr_size;
 
     gsi_level_interrupt _gsi;
@@ -293,6 +297,8 @@ private:
     struct rxq {
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(poll_func, sched::thread::attr().name("virtio-net-rx")) {};
+        rxq(vring* vq, std::function<void ()> poll_func, sched::cpu* c)
+            : vqueue(vq), poll_task(poll_func, sched::thread::attr().pin(c).name("virtio-net-rx")) {};
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
@@ -310,18 +316,18 @@ private:
      * @param rxq Rx queue handle
      * @param out_data output buffer
      */
-    void fill_qstats(const struct rxq& rxq, struct if_data* out_data) const;
+    void fill_qstats(const struct rxq* rxq, struct if_data* out_data) const;
 
     /**
      * Fill the Tx queue statistics in the general info struct
      * @param txq Tx queue handle
      * @param out_data output buffer
      */
-    void fill_qstats(const struct txq& txq, struct if_data* out_data) const;
+    void fill_qstats(const struct txq* txq, struct if_data* out_data) const;
 
-    /* We currently support only a single Rx+Tx queue */
-    struct rxq _rxq;
-    struct txq _txq;
+    /* We currently support max_virtqueues_nr / 2 pairs of Rx+Tx queues */
+    struct rxq* _rxq[max_virtqueues_nr / 2];
+    struct txq* _txq[max_virtqueues_nr / 2];
 
     //maintains the virtio instance number for multiple drives
     static int _instance;

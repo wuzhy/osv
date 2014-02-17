@@ -128,10 +128,11 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 
     net_d("*** processing packet! ***");
 
-    int error = vnet->tx_locked(m_head);
+    unsigned idx = vnet->pick_vq();
+    int error = vnet->tx_locked(idx, m_head);
 
     if (!error)
-        vnet->kick(1);
+        vnet->kick(2 * idx + 1);
 
     vnet->_tx_ring_lock.unlock();
 
@@ -161,35 +162,37 @@ static void if_getinfo(struct ifnet* ifp, struct if_data* out_data)
 
 void net::fill_stats(struct if_data* out_data) const
 {
-    // We currently support only a single Tx/Rx queue so no iteration so far
-    fill_qstats(_rxq, out_data);
-    fill_qstats(_txq, out_data);
+    // We currently support _num_queues / 2 pairs of Tx/Rx queues
+    for (unsigned idx = 0; idx < _num_queues / 2; idx++) {
+        fill_qstats(_rxq[idx], out_data);
+        fill_qstats(_txq[idx], out_data);
+    }
 }
 
-void net::fill_qstats(const struct rxq& rxq,
+void net::fill_qstats(const struct rxq* rxq,
                              struct if_data* out_data) const
 {
-    out_data->ifi_ipackets += rxq.stats.rx_packets;
-    out_data->ifi_ibytes   += rxq.stats.rx_bytes;
-    out_data->ifi_iqdrops  += rxq.stats.rx_drops;
-    out_data->ifi_ierrors  += rxq.stats.rx_csum_err;
+    out_data->ifi_ipackets += rxq->stats.rx_packets;
+    out_data->ifi_ibytes   += rxq->stats.rx_bytes;
+    out_data->ifi_iqdrops  += rxq->stats.rx_drops;
+    out_data->ifi_ierrors  += rxq->stats.rx_csum_err;
 }
 
-void net::fill_qstats(const struct txq& txq,
+void net::fill_qstats(const struct txq* txq,
                              struct if_data* out_data) const
 {
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
-    out_data->ifi_opackets += txq.stats.tx_packets;
-    out_data->ifi_obytes   += txq.stats.tx_bytes;
-    out_data->ifi_oerrors  += txq.stats.tx_err + txq.stats.tx_drops;
+    out_data->ifi_opackets += txq->stats.tx_packets;
+    out_data->ifi_obytes   += txq->stats.tx_bytes;
+    out_data->ifi_oerrors  += txq->stats.tx_err + txq->stats.tx_drops;
 }
 
-bool net::ack_irq()
+bool net::ack_irq(unsigned idx)
 {
     auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
 
     if (isr) {
-        _rxq.vqueue->disable_interrupts();
+        _rxq[idx]->vqueue->disable_interrupts();
         return true;
     } else {
         return false;
@@ -198,11 +201,9 @@ bool net::ack_irq()
 }
 
 net::net(pci::device& dev)
-    : virtio_driver(dev),
-      _rxq(get_virt_queue(0), [this] { this->receiver(); }),
-      _txq(get_virt_queue(1))
+    : virtio_driver(dev)
 {
-    sched::thread* poll_task = &_rxq.poll_task;
+    unsigned idx;
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -210,6 +211,31 @@ net::net(pci::device& dev)
 
     setup_features();
     read_config();
+    probe_virt_queues();
+
+    // Currently only two modes are supported:
+    //  1. single Rx/Tx
+    //  2. per-vCPU Rx/Tx
+    if (_max_queue_pairs >_num_queues / 2)
+       _cur_queue_pairs = _num_queues / 2;
+    else
+       _cur_queue_pairs = _max_queue_pairs;
+
+    if (_cur_queue_pairs >= sched::cpus.size())
+       _cur_queue_pairs = sched::cpus.size();
+    else
+       _cur_queue_pairs = 1;
+
+    for (idx = 0; idx < _cur_queue_pairs; idx++) {
+        if (_cur_queue_pairs != 1)
+           _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
+        else
+           _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); });
+
+        _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
+    }
+
+    // create ctlq
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
@@ -231,7 +257,11 @@ net::net(pci::device& dev)
     _ifn->if_qflush = if_qflush;
     _ifn->if_init = if_init;
     _ifn->if_getinfo = if_getinfo;
-    IFQ_SET_MAXLEN(&_ifn->if_snd, _txq.vqueue->size());
+
+    int ifn_qsize = 0;
+    for (idx = 0; idx < _cur_queue_pairs; idx++)
+        ifn_qsize += _txq[idx]->vqueue->size();
+    IFQ_SET_MAXLEN(&_ifn->if_snd, ifn_qsize);
 
     _ifn->if_capabilities = 0;
 
@@ -252,19 +282,23 @@ net::net(pci::device& dev)
     _ifn->if_capenable = _ifn->if_capabilities | IFCAP_HWSTATS;
 
     //Start the polling thread before attaching it to the Rx interrupt
-    poll_task->start();
+    for (idx = 0; idx < _cur_queue_pairs; idx++)
+        _rxq[idx]->poll_task.start();
 
     ether_ifattach(_ifn, _config.mac);
-    if (dev.is_msix()) {
-        _msi.easy_register({
-            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-            { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
-        });
-    } else {
-        _gsi.set_ack_and_handler(dev.get_interrupt_line(), [=] { return this->ack_irq(); }, [=] { poll_task->wake(); });
-    }
 
-    fill_rx_ring();
+    for (idx = 0; idx < _cur_queue_pairs; idx++) {
+        if (dev.is_msix()) {
+            _msi.easy_register({
+                { 2 * idx, [&] { _rxq[idx]->vqueue->disable_interrupts(); }, &_rxq[idx]->poll_task },
+                { 2 * idx + 1, [&] { _txq[idx]->vqueue->disable_interrupts(); }, nullptr }
+            });
+        } else {
+            _gsi.set_ack_and_handler(dev.get_interrupt_line(), [=] { return this->ack_irq(idx); }, [=] { _rxq[idx]->poll_task.wake(); });
+        }
+
+        fill_rx_ring(idx);
+    }
 
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
 }
@@ -282,6 +316,22 @@ net::~net()
 
     ether_ifdetach(_ifn);
     if_free(_ifn);
+    free_vqs();
+}
+
+void net::free_vqs()
+{
+    for (unsigned idx = 0; idx < _cur_queue_pairs; idx++) {
+       if (nullptr != _rxq[idx]) {
+          delete _rxq[idx];
+          _rxq[idx] = nullptr;
+       }
+
+       if (nullptr != _txq[idx]) {
+          delete _txq[idx];
+          _txq[idx] = nullptr;
+       }
+    }
 }
 
 void net::read_config()
@@ -307,6 +357,10 @@ void net::read_config()
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
     _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
+    if (get_guest_feature_bit(VIRTIO_NET_F_MQ))
+       _max_queue_pairs = _config.max_virtqueue_pairs;
+    else
+       _max_queue_pairs = 1;
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
@@ -376,7 +430,8 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 
 void net::receiver()
 {
-    vring* vq = _rxq.vqueue;
+    unsigned idx = pick_vq();
+    vring* vq = _rxq[idx]->vqueue;
 
     while (1) {
 
@@ -479,22 +534,22 @@ void net::receiver()
         }
 
         if (vq->refill_ring_cond())
-            fill_rx_ring();
+            fill_rx_ring(idx);
 
         // Update the stats
-        _rxq.stats.rx_drops      += rx_drops;
-        _rxq.stats.rx_packets    += rx_packets;
-        _rxq.stats.rx_csum       += csum_ok;
-        _rxq.stats.rx_csum_err   += csum_err;
-        _rxq.stats.rx_bytes      += rx_bytes;
+        _rxq[idx]->stats.rx_drops      += rx_drops;
+        _rxq[idx]->stats.rx_packets    += rx_packets;
+        _rxq[idx]->stats.rx_csum       += csum_ok;
+        _rxq[idx]->stats.rx_csum_err   += csum_err;
+        _rxq[idx]->stats.rx_bytes      += rx_bytes;
     }
 }
 
-void net::fill_rx_ring()
+void net::fill_rx_ring(unsigned idx)
 {
     trace_virtio_net_fill_rx_ring(_ifn->if_index);
     int added = 0;
-    vring* vq = _rxq.vqueue;
+    vring* vq = _rxq[idx]->vqueue;
 
     while (vq->avail_ring_not_empty()) {
         struct mbuf* m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, MCLBYTES);
@@ -520,16 +575,16 @@ void net::fill_rx_ring()
 }
 
 // TODO: Does it really have to be "locked"?
-int net::tx_locked(struct mbuf* m_head, bool flush)
+int net::tx_locked(unsigned idx, struct mbuf* m_head, bool flush)
 {
     DEBUG_ASSERT(_tx_ring_lock.owned(), "_tx_ring_lock is not locked!");
 
     struct mbuf* m;
     net_req* req = new net_req;
-    vring* vq = _txq.vqueue;
+    vring* vq = _txq[idx]->vqueue;
     auto vq_sg_vec = &vq->_sg_vec;
     int rc = 0;
-    struct txq_stats* stats = &_txq.stats;
+    struct txq_stats* stats = &_txq[idx]->stats;
     u64 tx_bytes = 0;
 
     req->um.reset(m_head);
@@ -564,7 +619,7 @@ int net::tx_locked(struct mbuf* m_head, bool flush)
         // can't call it, this is a get buf thing
         if (vq->used_ring_not_empty()) {
             trace_virtio_net_tx_no_space_calling_gc(_ifn->if_index);
-            tx_gc();
+            tx_gc(idx);
         } else {
             net_d("%s: no room", __FUNCTION__);
             delete req;
@@ -692,11 +747,24 @@ net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
     return m;
 }
 
-void net::tx_gc()
+// TODO: it still need more effort
+//  1. a better way to select tx
+//  2. work together with Vlad Zolotarov's Tx softirq affinity
+unsigned net::pick_vq()
+{
+    unsigned idx = 0;
+
+    if (_cur_queue_pairs != 1)
+       idx = sched::cpu::current()->id;
+
+   return idx;
+}
+
+void net::tx_gc(unsigned idx)
 {
     net_req* req;
     u32 len;
-    vring* vq = _txq.vqueue;
+    vring* vq = _txq[idx]->vqueue;
 
     req = static_cast<net_req*>(vq->get_buf_elem(&len));
 
@@ -720,8 +788,9 @@ u32 net::get_driver_features()
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
-                 | (1 << VIRTIO_NET_F_GUEST_ECN)
-                 | (1 << VIRTIO_NET_F_GUEST_UFO)
+                 | (1 << VIRTIO_NET_F_GUEST_ECN)  \
+                 | (1 << VIRTIO_NET_F_GUEST_UFO)  \
+                 | (1 << VIRTIO_NET_F_MQ)
             );
 }
 
