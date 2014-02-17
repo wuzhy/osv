@@ -213,8 +213,10 @@ net::net(pci::device& dev)
     read_config();
     probe_virt_queues();
 
+printf("net nq %d\n", _num_queues);
+
     for (idx = 0; idx < _num_queues / 2; idx++) {
-        _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
+        _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); });
         _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
     }
 
@@ -413,8 +415,9 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 
 void net::receiver()
 {
-    unsigned idx = sched::cpu::current()->id;
+    unsigned idx = pick_txq(nullptr);
     vring* vq = _rxq[idx]->vqueue;
+printf("receiver idx %d\n", idx);
 
     while (1) {
 
@@ -745,7 +748,10 @@ unsigned net::pick_txq(mbuf* m)
 
 //    return (unsigned) (((u64) hash * (_num_queues / 2)) >> 32);
 
-      return sched::cpu::current()->id;
+   unsigned idx = sched::cpu::current()->id;
+   idx %= (_num_queues / 2);
+
+   return idx;
 }
 
 void net::tx_gc(unsigned idx)
