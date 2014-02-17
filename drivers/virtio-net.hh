@@ -205,7 +205,7 @@ public:
     explicit net(pci::device& dev);
     virtual ~net();
 
-    void free_net_queues();
+    void free_vqs();
     virtual const std::string get_name() { return _driver_name; }
     void read_config();
 
@@ -230,7 +230,7 @@ public:
     int tx_locked(unsigned idx, struct mbuf* m_head, bool flush = false);
 
     struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
-    unsigned pick_txq(struct mbuf* m);
+    unsigned pick_vq();
     void kick(int queue) {_queues[queue]->kick();}
     void tx_gc(unsigned idx);
     static hw_driver* probe(hw_device* dev);
@@ -269,9 +269,9 @@ private:
     bool _guest_tso4 = false;
     bool _host_tso4 = false;
     bool _guest_ufo = false;
-    bool _net_mq = false;
 
     u16 _max_queue_pairs;
+    u16 _cur_queue_pairs;
     u32 _hdr_size;
 
     gsi_level_interrupt _gsi;

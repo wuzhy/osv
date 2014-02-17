@@ -19,7 +19,7 @@ rng::rng(pci::device& pci_dev)
     , _thread([&] { worker(); }, sched::thread::attr().name("virtio-rng"))
 {
     probe_virt_queues();
-    _queue = get_virt_queue(0);
+    _queue = get_virt_quue(0);
 
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
 

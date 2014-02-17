@@ -128,7 +128,7 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 
     net_d("*** processing packet! ***");
 
-    unsigned idx = vnet->pick_txq(m_head);
+    unsigned idx = vnet->pick_vq();
     int error = vnet->tx_locked(idx, m_head);
 
     if (!error)
@@ -213,12 +213,17 @@ net::net(pci::device& dev)
     read_config();
     probe_virt_queues();
 
-printf("net nq %d\n", _num_queues);
+    if (_max_queue_pairs >_num_queues / 2)
+       _cur_queue_pairs = _num_queues / 2;
+    else
+       _cur_queue_pairs = _max_queue_pairs;
 
-    for (idx = 0; idx < _num_queues / 2; idx++) {
+    for (idx = 0; idx < _cur_queue_pairs; idx++) {
         _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); });
         _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
     }
+
+    // create ctlq
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
@@ -242,9 +247,8 @@ printf("net nq %d\n", _num_queues);
     _ifn->if_getinfo = if_getinfo;
 
     int ifn_qsize = 0;
-    for (idx = 0; idx < _num_queues / 2; idx++)
+    for (idx = 0; idx < _cur_queue_pairs; idx++)
         ifn_qsize += _txq[idx]->vqueue->size();
-
     IFQ_SET_MAXLEN(&_ifn->if_snd, ifn_qsize);
 
     _ifn->if_capabilities = 0;
@@ -266,12 +270,12 @@ printf("net nq %d\n", _num_queues);
     _ifn->if_capenable = _ifn->if_capabilities | IFCAP_HWSTATS;
 
     //Start the polling thread before attaching it to the Rx interrupt
-    for (idx = 0; idx < _num_queues / 2; idx++)
+    for (idx = 0; idx < _cur_queue_pairs; idx++)
         _rxq[idx]->poll_task.start();
 
     ether_ifattach(_ifn, _config.mac);
 
-    for (idx = 0; idx < _num_queues / 2; idx++) {
+    for (idx = 0; idx < _cur_queue_pairs; idx++) {
         if (dev.is_msix()) {
             _msi.easy_register({
                 { 2 * idx, [&] { _rxq[idx]->vqueue->disable_interrupts(); }, &_rxq[idx]->poll_task },
@@ -300,12 +304,12 @@ net::~net()
 
     ether_ifdetach(_ifn);
     if_free(_ifn);
-    free_net_queues();
+    free_vqs();
 }
 
-void net::free_net_queues()
+void net::free_vqs()
 {
-    for (unsigned idx = 0; idx < _num_queues / 2; idx++) {
+    for (unsigned idx = 0; idx < _cur_queue_pairs; idx++) {
        if (nullptr != _rxq[idx]) {
           delete _rxq[idx];
           _rxq[idx] = nullptr;
@@ -341,16 +345,15 @@ void net::read_config()
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
     _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
-    _net_mq = get_guest_feature_bit(VIRTIO_NET_F_MQ);
-    if (_net_mq)
+    if (get_guest_feature_bit(VIRTIO_NET_F_MQ))
        _max_queue_pairs = _config.max_virtqueue_pairs;
+    else
+       _max_queue_pairs = 1;
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
     net_i("Features: %s=%d", "host tso4", _host_tso4);
-    printf("Features: net_mq %d\n", _net_mq);
-    printf("Features: max_queue_pairs %d\n", _max_queue_pairs);
 }
 
 /**
@@ -415,9 +418,8 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 
 void net::receiver()
 {
-    unsigned idx = pick_txq(nullptr);
+    unsigned idx = pick_vq();
     vring* vq = _rxq[idx]->vqueue;
-printf("receiver idx %d\n", idx);
 
     while (1) {
 
@@ -738,20 +740,9 @@ net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
 // TODO: it still need more effort
 //  1. a better way to select tx
 //  2. work together with Vlad Zolotarov's Tx softirq affinity
-unsigned net::pick_txq(mbuf* m)
+unsigned net::pick_vq()
 {
-//    struct ether_header* eh;
-//    u16 hash;
-
-//    eh = mtod(m, struct ether_header*);
-//    hash = ntohs(eh->ether_type);
-
-//    return (unsigned) (((u64) hash * (_num_queues / 2)) >> 32);
-
-   unsigned idx = sched::cpu::current()->id;
-   idx %= (_num_queues / 2);
-
-   return idx;
+   return sched::cpu::current()->id % _cur_queue_pairs;
 }
 
 void net::tx_gc(unsigned idx)

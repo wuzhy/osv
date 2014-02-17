@@ -120,9 +120,9 @@ blk::blk(pci::device& pci_dev)
     _id = _instance++;
     virtio_i("VIRTIO BLK INSTANCE %d", _id);
 
-    probe_virt_queues();
     setup_features();
     read_config();
+    probe_virt_queues();
 
     //register the single irq callback for the block
     sched::thread* t = new sched::thread([this] { this->req_done(); },
