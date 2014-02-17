@@ -376,6 +376,7 @@ scsi::scsi(pci::device& dev)
     _driver_name = "virtio-scsi";
     _id = _instance++;
 
+    probe_virt_queues();
     setup_features();
     read_config();
 

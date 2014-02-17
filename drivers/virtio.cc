@@ -44,7 +44,7 @@ virtio_driver::virtio_driver(pci::device& dev)
     add_dev_status(VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
 
     // Generic init of virtqueues
-    probe_virt_queues();
+    // probe_virt_queues();
 }
 
 virtio_driver::~virtio_driver()

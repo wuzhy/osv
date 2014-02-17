@@ -211,6 +211,7 @@ net::net(pci::device& dev)
 
     setup_features();
     read_config();
+    probe_virt_queues();
 
     for (idx = 0; idx < _num_queues / 2; idx++) {
         _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); }, sched::cpus[idx]);
