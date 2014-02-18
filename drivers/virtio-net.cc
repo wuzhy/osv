@@ -216,12 +216,8 @@ net::net(pci::device& dev)
     // Currently only two modes are supported:
     //  1. single Rx/Tx
     //  2. per-vCPU Rx/Tx
-    if (_max_queue_pairs >_num_queues / 2)
-       _cur_queue_pairs = _num_queues / 2;
-    else
-       _cur_queue_pairs = _max_queue_pairs;
-
-    if (_cur_queue_pairs >= sched::cpus.size())
+    if (((2 * sched::cpus.size() + 1) <= _num_queues) &&
+       (sched::cpus.size() <= _max_queue_pairs))
        _cur_queue_pairs = sched::cpus.size();
     else
        _cur_queue_pairs = 1;
@@ -235,7 +231,7 @@ net::net(pci::device& dev)
         _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
     }
 
-    // create ctlq
+    _ctrlq = new ctrlq(get_virt_queue(2 * _cur_queue_pairs));
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
@@ -300,6 +296,10 @@ net::net(pci::device& dev)
         fill_rx_ring(idx);
     }
 
+    if (_cur_queue_pairs > 1) {
+        set_queues(_cur_queue_pairs);
+    }
+
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
 }
 
@@ -317,21 +317,6 @@ net::~net()
     ether_ifdetach(_ifn);
     if_free(_ifn);
     free_vqs();
-}
-
-void net::free_vqs()
-{
-    for (unsigned idx = 0; idx < _cur_queue_pairs; idx++) {
-       if (nullptr != _rxq[idx]) {
-          delete _rxq[idx];
-          _rxq[idx] = nullptr;
-       }
-
-       if (nullptr != _txq[idx]) {
-          delete _txq[idx];
-          _txq[idx] = nullptr;
-       }
-    }
 }
 
 void net::read_config()
@@ -758,6 +743,45 @@ unsigned net::pick_vq()
        idx = sched::cpu::current()->id;
 
    return idx;
+}
+
+void net::free_vqs()
+{
+    for (unsigned idx = 0; idx < _cur_queue_pairs; idx++) {
+       if (nullptr != _rxq[idx]) {
+          delete _rxq[idx];
+          _rxq[idx] = nullptr;
+       }
+
+       if (nullptr != _txq[idx]) {
+          delete _txq[idx];
+          _txq[idx] = nullptr;
+       }
+    }
+}
+
+void net::set_queues(u16 queue_pairs)
+{
+    vring* vq = _ctrlq->vqueue;
+    vq->init_sg();
+
+    auto* req = new ctrl_req;
+
+    net_ctrl_hdr* hdr = &req->hdr;
+    hdr->class_t = VIRTIO_NET_CTRL_MQ;
+    hdr->cmd = VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET;
+    vq->add_out_sg(hdr, sizeof(struct net_ctrl_hdr));
+
+    net_ctrl_mq* msg = &req->msg;
+    msg->virtqueue_pairs = queue_pairs;
+    vq->add_out_sg(msg, sizeof(struct net_ctrl_mq));
+
+    net_ctrl_ack* ack = &req->ack;
+    *ack = 0;
+    vq->add_in_sg(ack, sizeof(net_ctrl_ack));
+
+    vq->add_buf_wait(req);
+    vq->kick();
 }
 
 void net::tx_gc(unsigned idx)

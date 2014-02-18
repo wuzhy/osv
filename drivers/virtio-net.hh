@@ -205,6 +205,7 @@ public:
     virtual ~net();
 
     void free_vqs();
+    void set_queues(u16 queue_pairs);
     virtual const std::string get_name() { return _driver_name; }
     void read_config();
 
@@ -255,6 +256,15 @@ private:
         std::unique_ptr<struct mbuf, free_deleter> um;
 
         net_req() {memset(&mhdr,0,sizeof(mhdr));};
+    };
+
+    struct ctrl_req {
+        ctrl_req() {};
+        ~ctrl_req() {};
+
+        net_ctrl_hdr hdr;
+        net_ctrl_mq msg;
+        net_ctrl_ack ack;
     };
 
     std::string _driver_name;
@@ -311,6 +321,15 @@ private:
         struct txq_stats stats = { 0 };
     };
 
+    /* Single Ctrl queue object */
+    struct ctrlq {
+        ctrlq(vring* vq) : vqueue(vq) {};
+     //   ctrlq(vring* vq, std::function<void ()> poll_func)
+     //       : vqueue(vq), poll_task(poll_func, sched::thread::attr().name("virtio-net-ctrl")) {};
+        vring* vqueue;
+     //   sched::thread  poll_task;
+    };
+
     /**
      * Fill the Rx queue statistics in the general info struct
      * @param rxq Rx queue handle
@@ -328,6 +347,7 @@ private:
     /* We currently support max_virtqueues_nr / 2 pairs of Rx+Tx queues */
     struct rxq* _rxq[max_virtqueues_nr / 2];
     struct txq* _txq[max_virtqueues_nr / 2];
+    struct ctrlq* _ctrlq;
 
     //maintains the virtio instance number for multiple drives
     static int _instance;
