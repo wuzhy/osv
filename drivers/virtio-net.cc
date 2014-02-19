@@ -229,8 +229,14 @@ net::net(pci::device& dev)
            _rxq[idx] = new rxq(get_virt_queue(2 * idx), [this] { this->receiver(); });
 
         _txq[idx] = new txq(get_virt_queue(2 * idx + 1));
+unsigned q_idx = 2 * idx + 1;
+printf("txq idx %d\n", q_idx);
     }
 
+    if (get_virt_queue(2 * _cur_queue_pairs) == nullptr)
+        printf("ctrlq is nullptr\n");
+
+    printf("ctrlq isn't nullptr, cur %d numq %d\n", _cur_queue_pairs, _num_queues);
     _ctrlq = new ctrlq(get_virt_queue(2 * _cur_queue_pairs));
 
     _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
@@ -296,11 +302,19 @@ net::net(pci::device& dev)
         fill_rx_ring(idx);
     }
 
+    if (dev.is_msix()) {
+        sched::thread* t = new sched::thread([this] { this->ctrl_req_done(); },
+            sched::thread::attr().name("virtio-net-ctrl"));
+        t->start();
+        _msi.easy_register({ { (unsigned)(2 * _cur_queue_pairs), [&] {_ctrlq->vqueue->disable_interrupts(); }, t } });
+   }
+
     if (_cur_queue_pairs > 1) {
         set_queues(_cur_queue_pairs);
     }
 
     add_dev_status(VIRTIO_CONFIG_S_DRIVER_OK);
+printf("leave from net::net\n");
 }
 
 net::~net()
@@ -346,6 +360,9 @@ void net::read_config()
        _max_queue_pairs = _config.max_virtqueue_pairs;
     else
        _max_queue_pairs = 1;
+
+    if (get_guest_feature_bit(VIRTIO_NET_F_CTRL_VQ))
+       printf("ctrl vq is supported\n");
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
@@ -760,12 +777,39 @@ void net::free_vqs()
     }
 }
 
+void net::ctrl_req_done()
+{
+    vring* queue = _ctrlq->vqueue;
+
+printf("come to ctrl_req_done\n");
+
+    while (1) {
+//printf("come to ctrl_req_done 1\n");
+        virtio_driver::wait_for_queue(queue, &vring::used_ring_not_empty);
+
+        ctrl_req* req;
+        u32 len;
+        while ((req = static_cast<ctrl_req*>(queue->get_buf_elem(&len))) != nullptr) {
+printf("come to ctrl_req_done 2\n");
+            assert(req->ack == VIRTIO_NET_OK);
+            delete req;
+            queue->get_buf_finalize();
+        }
+printf("come to ctrl_req_done 3\n");
+
+        // wake up the requesting thread in case the ring was full before
+        queue->wakeup_waiter();
+    }
+printf("come to ctrl_req_done 4\n");
+}
+
 void net::set_queues(u16 queue_pairs)
 {
+printf("set_queues\n");
     vring* vq = _ctrlq->vqueue;
     vq->init_sg();
 
-    auto* req = new ctrl_req;
+    ctrl_req* req = new ctrl_req;
 
     net_ctrl_hdr* hdr = &req->hdr;
     hdr->class_t = VIRTIO_NET_CTRL_MQ;
@@ -782,6 +826,7 @@ void net::set_queues(u16 queue_pairs)
 
     vq->add_buf_wait(req);
     vq->kick();
+printf("leave from set_queues\n");
 }
 
 void net::tx_gc(unsigned idx)
@@ -814,6 +859,7 @@ u32 net::get_driver_features()
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
                  | (1 << VIRTIO_NET_F_GUEST_ECN)  \
                  | (1 << VIRTIO_NET_F_GUEST_UFO)  \
+                 | (1 << VIRTIO_NET_F_CTRL_VQ)  \
                  | (1 << VIRTIO_NET_F_MQ)
             );
 }

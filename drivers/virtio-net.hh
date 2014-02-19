@@ -205,6 +205,7 @@ public:
     virtual ~net();
 
     void free_vqs();
+    void ctrl_req_done();
     void set_queues(u16 queue_pairs);
     virtual const std::string get_name() { return _driver_name; }
     void read_config();

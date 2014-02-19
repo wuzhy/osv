@@ -304,6 +304,7 @@ void* do_main_thread(void *_commands)
     drvman->register_driver(ide::ide_drive::probe);
     boot_time.event("drivers probe");
     drvman->load_all();
+printf("complete load_all\n");
     drvman->list_drivers();
 
     randomdev::randomdev_init();
@@ -315,8 +316,10 @@ void* do_main_thread(void *_commands)
     }
     boot_time.event("ZFS mounted");
 
+printf("complete load_all 1\n");
     bool has_if = false;
     osv::for_each_if([&has_if] (std::string if_name) {
+printf("complete load_all 12\n");
         if (if_name == "lo0")
             return;
 
@@ -325,10 +328,14 @@ void* do_main_thread(void *_commands)
         if (osv::start_if(if_name, "0.0.0.0", "255.255.255.0") != 0 ||
             osv::ifup(if_name) != 0)
             debug("Could not initialize network interface.\n");
+printf("complete load_all 112\n");
     });
+printf("complete load_all 1112\n");
     if (has_if) {
+printf("complete load_all 11112\n");
         dhcp_start(true);
     }
+printf("complete load_all 2\n");
 
     if (!opt_chdir.empty()) {
         debug("Chdir to: '%s'\n", opt_chdir.c_str());
@@ -339,6 +346,7 @@ void* do_main_thread(void *_commands)
         debug("chdir done\n");
     }
 
+printf("complete load_all 3\n");
     boot_time.event("Total time");
 
     // run each payload in order
@@ -357,6 +365,7 @@ void* do_main_thread(void *_commands)
             bg.push_back(t);
         }
     }
+printf("complete load_all 4\n");
 
     void* retval;
     for (auto t : bg) {

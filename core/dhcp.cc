@@ -589,15 +589,19 @@ namespace dhcp {
                 sched::timer t(*sched::thread::current());
                 using namespace osv::clock::literals;
                 t.set(3_s);
+printf("dhcp wait before\n");
 
                 sched::thread::wait_until([&]{ return _have_ip || t.expired(); });
+printf("dhcp wait after\n");
             }
         } while (!_have_ip && wait);
     }
 
     void dhcp_worker::dhcp_worker_fn()
     {
+printf("come to dhcp_worker_fn\n");
         while (true) {
+printf("come to dhcp_worker_fn 1\n");
             mbuf* m;
             WITH_LOCK(_lock) {
                 sched::thread::wait_until(_lock, [&] {
@@ -614,8 +618,10 @@ namespace dhcp {
                 dhcp_e("Couldn't find interface state for DHCP packet!");
                 abort();
             }
+printf("come to dhcp_worker_fn 2\n");
 
             it->second->process_packet(m);
+printf("come to dhcp_worker_fn 3\n");
 
             // Check if we got an ip
             if (it->second->is_acknowledged()) {
@@ -625,15 +631,18 @@ namespace dhcp {
                 }
             }
         }
+printf("come to dhcp_worker_fn 4\n");
     }
 
     void dhcp_worker::queue_packet(struct mbuf* m)
     {
+printf("come to queue_packet\n");
         WITH_LOCK (_lock) {
             _rx_packets.push_front(m);
         }
 
         _dhcp_thread->wake();
+printf("come to queue_packet 1\n");
     }
 
 }
